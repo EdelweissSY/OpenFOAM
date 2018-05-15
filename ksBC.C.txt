@@ -1,0 +1,180 @@
+/*---------------------------------------------------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     |
+    \\  /    A nd           | Copyright (C) 2011 OpenFOAM Foundation
+     \\/     M anipulation  |
+-------------------------------------------------------------------------------
+License
+    This file is part of OpenFOAM.
+
+    OpenFOAM is free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    OpenFOAM is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+    FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+    for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with OpenFOAM.  If not, see <http://www.gnu.org/licenses/>.
+
+\*---------------------------------------------------------------------------*/
+
+#include "ksFvPatchVectorField.H"
+#include "addToRunTimeSelectionTable.H"
+#include "volFields.H"
+#include "surfaceFields.H"
+#include "mathematicalConstants.H"//支持方法中的数学操作
+#define random(x)(rand()%x)
+
+// * * * * * * * * * * * * * * * * Constructors  * * * * * * * * * * * * * * //
+namespace Foam
+{
+vector ksFvPatchVectorField::currentScale() const //KS 法脉动风速生成私有函数
+{    
+    vector x[3],K,A,B,U;
+    const vector X(1,0,0);//有点问题
+    scalar a,b,k[2],Ek,d;
+    const scalar L=1200,n=1;//“大尺度”和“小尺度”
+    const label Nmax=100;//100个波数
+    U[0]=U[1]=U[2]=0;
+    for(int i=1;i<101;i++)
+        {
+            for(int m=0;m<3;m++)
+                {
+                    a=constant::mathematical::twoPi*random(361)/360;
+                    b=constant::mathematical::twoPi*random(361)/360;//随机相位
+                    x[m][0]=cos(a)*cos(b);
+                    x[m][1]=sin(a)*cos(b);
+                    x[m][2]=sin(b);//单位圆向量的三个分量，共生成三个单位元向量
+                }//生成三个单位元向量
+            k[0]=(constant::mathematical::twoPi/L)*pow(L/n,(i-1)/(Nmax-1.0));//第n个波数的绝对值
+            k[1]=(constant::mathematical::twoPi/L)*pow(L/n,i/(Nmax-1.0));//第n+1个波数的绝对值
+            K=k[0]*x[0];//生成单位圆波数向量
+            A=K^x[1];
+            B=K^x[2];//生成单位圆振幅向量（^重载运算符表示矢量积）
+            Ek=4*cucaoduxishu_*14*14*pow(1200*k[0]/6.28,2)/k[0]/pow(1+pow(1200*k[0]/6.28,2),4.0/3.0);//第n个波数对                   //应的湍动能谱上的值，注意这里取了标准高度为10m时的平均风速为14m/s
+            d=sqrt((k[1]-k[0])*Ek);//得到第n个波数对应的振幅平方根值（两个振幅的模相等）
+            A=d*A/(mag(A)+0.0001);//如果程序出现bug，被除数 mag（）值可加一个如 0.0001 小值
+            B=d*B/(mag(B)+0.0001);//把振幅的模变为能谱要求的模
+            d=(K && X)+0.5*sqrt(k[0]*k[0]*k[0]*Ek)*this->db().time().value()*scale_ *deltaT_;//&&应该是向量点积
+            U=U+A*cos(d)+B*sin(d);
+        }
+return U;
+}
+
+ksFvPatchVectorField::ksFvPatchVectorField
+(
+    const fvPatch& p,
+    const DimensionedField<vector，volMesh>& iF
+):
+fixedValueFvPatchVectorField(p, iF),//构造函数法初始化基类成员
+Umean_(0,0,0),
+h_(1),
+m_(1),
+scale_(1),
+cucaoduxishu_(1),
+deltaT_(1),
+curTimeIndex_(-1)//列表法初始化新成员
+{}
+
+ksFvPatchVectorField::ksFvPatchVectorField
+(
+    const ksFvPatchVectorField& ptf,
+    const fvPatch& p,
+    const DimensionedField<vector, volMesh>& iF,
+    const fvPatchFieldMapper& mapper
+):
+fixedValueFvPatchVectorField(ptf, p, iF,
+mapper),
+Umean_(ptf.Umean_),
+h_(ptf.h_),
+m_(ptf.m_),
+scale_(ptf.m_),
+cucaoduxishu_(ptf.m_),
+deltaT_(ptf.m_),
+curTimeIndex_(-1)
+{}
+
+ksFvPatchVectorField::ksFvPatchVectorField
+(
+    const fvPatch& p,
+    const DimensionedField<vector, volMesh>& iF,
+    const dictionary& dict
+):
+fixedValueFvPatchVectorField(p, iF),
+Umean_(dict.lookup("Umean")),
+h_(readScalar(dict.lookup("h"))),
+m_(readScalar(dict.lookup("m"))),
+scale_(readScalar(dict.lookup("scale"))),
+cucaoduxishu_(readScalar(dict.lookup("cucaoduxishu"))),
+deltaT_(readScalar(dict.lookup("deltaT"))),
+curTimeIndex_(-1)
+{
+evaluate();
+}
+
+ksFvPatchVectorField::ksFvPatchVectorField
+(
+    const ksFvPatchVectorField& fcvpvf,
+    const DimensionedField<vector, volMesh>& iF
+):
+fixedValueFvPatchVectorField(fcvpvf, iF),
+Umean_(fcvpvf.Umean_),
+h_(fcvpvf.h_),
+m_(fcvpvf.m_),
+scale_(fcvpvf.scale_),
+cucaoduxishu_(fcvpvf.cucaoduxishu_),
+deltaT_(fcvpvf.deltaT_),
+curTimeIndex_(-1)
+{}
+
+void ksFvPatchVectorField::updateCoeffs()//用于生成湍流入流
+{
+    if (updated())
+    {
+        return;
+    }
+    if (curTimeIndex_ !=this->db().time().timeIndex())
+    {
+        const vectorField& Cf = patch().Cf();//patch().Cf()指向的好像是坐标
+        forAll(*this,i)
+        {
+            (*this)[i]=Umean_*pow(Cf[i][2]/(h_/scale_),m_)+currentScale();//Cf[i][2]指的应该是i点的第三个维度，即z
+        }
+        curTimeIndex_ =this->db().time().timeIndex();
+    }
+    fixedValueFvPatchVectorField::updateCoeffs();
+}
+
+void ksFvPatchVectorField::write(Ostream& os)
+const
+{
+fvPatchVectorField::write(os);
+os.writeKeyword("Umean")
+<< Umean_ <<
+token::END_STATEMENT << nl;
+os.writeKeyword("h")
+<< h_ << token::END_STATEMENT
+<< nl;
+os.writeKeyword("m")
+<< m_ << token::END_STATEMENT
+<< nl;
+os.writeKeyword("scale")
+<< scale_ <<
+token::END_STATEMENT << nl;
+os.writeKeyword("cucaoduxishu")
+<< cucaoduxishu_ <<
+token::END_STATEMENT << nl;
+os.writeKeyword("deltaT")
+<< deltaT_ <<
+token::END_STATEMENT << nl;
+writeEntry("value", os);
+}
+makePatchTypeField(fvPatchVectorField,ksFvPatchVectorField);
+} 
+
+// ************************************************************************* //
